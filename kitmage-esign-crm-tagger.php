@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Kitmage E-Sign CRM Tagger
  * Description: Applies FluentCRM tags after a logged-in user signs a mapped WP E-Signature document.
- * Version: 0.1.0
+ * Version: 0.1.1
  * Requires PHP: 7.4
  * Author: Kitmage
  * Text Domain: kitmage-esign-crm-tagger
@@ -63,7 +63,7 @@ final class Kitmage_ESign_CRM_Tagger {
                 <input type="hidden" name="action" value="kitmage_esign_crm_save">
                 <?php wp_nonce_field('kitmage_esign_crm_save'); ?>
                 <textarea name="mappings" rows="12" cols="70" class="large-text code" placeholder="123: 24&#10;456: 16, 32"><?php echo esc_textarea($mappings); ?></textarea>
-                <p class="description">For stand-alone documents, use the original stand-alone document ID (not each generated signed copy). For basic documents, use the document ID. Only the actual logged-in signer can be tagged.</p>
+                <p class="description">For stand-alone documents, use the original stand-alone document ID (not each generated signed copy). For basic documents, use the document ID. The logged-in WordPress user's email is the sole identity source; ApproveMe recipient identity fields are ignored.</p>
                 <?php submit_button('Save Mappings'); ?>
             </form>
         </div>
@@ -131,9 +131,10 @@ final class Kitmage_ESign_CRM_Tagger {
     }
 
     /**
-     * ApproveMe passes an array with recipient, invitation, signature_id, and
-     * for stand-alone documents the originating template ID in sad_doc_id.
-     * Fail closed unless the WordPress session matches the signer.
+     * ApproveMe provides the signed document ID and signature ID.
+     * Identity comes exclusively from the currently logged-in WordPress
+     * account's email address, never ApproveMe recipient fields or a
+     * FluentCRM WordPress-user-ID lookup.
      */
     public static function on_signature($event) {
         if (!is_array($event) || !is_user_logged_in() || !function_exists('FluentCrmApi')) {
@@ -142,21 +143,10 @@ final class Kitmage_ESign_CRM_Tagger {
 
         $user_id = get_current_user_id();
         $user = get_userdata($user_id);
-        $recipient = isset($event['recipient']) && is_object($event['recipient'])
-            ? $event['recipient'] : null;
+        $email = $user && is_string($user->user_email)
+            ? sanitize_email($user->user_email) : '';
 
-        if (!$user || !$recipient) {
-            return;
-        }
-
-        $signer_user_id = isset($recipient->wp_user_id) ? absint($recipient->wp_user_id) : 0;
-        $signer_email = isset($recipient->user_email) && is_string($recipient->user_email)
-            ? sanitize_email($recipient->user_email) : '';
-
-        // Matching either supplied identifier is necessary, and neither may conflict.
-        if ((!$signer_user_id && !$signer_email)
-            || ($signer_user_id && $signer_user_id !== $user_id)
-            || ($signer_email && 0 !== strcasecmp($signer_email, $user->user_email))) {
+        if (!$email || !is_email($email)) {
             return;
         }
 
@@ -182,14 +172,13 @@ final class Kitmage_ESign_CRM_Tagger {
 
         try {
             $api = FluentCrmApi('contacts');
-            $contact = $api->getContactByUserRef($user_id);
+            $contact = $api->getContact($email);
 
             // A signed agreement is not marketing consent. Do not auto-subscribe.
             if (!$contact) {
                 $contact = $api->createOrUpdate(array(
-                    'email'   => $user->user_email,
-                    'user_id' => $user_id,
-                    'status'  => 'transactional',
+                    'email'  => $email,
+                    'status' => 'transactional',
                 ));
             }
             if (!$contact) {
